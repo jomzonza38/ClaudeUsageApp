@@ -19,7 +19,7 @@ Claude Usage Widget — floating widget บนเดสก์ท็อป macOS
 import sys
 import json
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 import requests
 import keyring
@@ -30,7 +30,7 @@ except ImportError:
     objc = None
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QMenu, QInputDialog, QMessageBox, QLineEdit, QSlider, QPushButton,
+    QMenu, QMessageBox, QLineEdit, QSlider, QPushButton,
     QSystemTrayIcon, QDialog, QDialogButtonBox,
 )
 from PyQt6.QtCore import (
@@ -813,7 +813,7 @@ class Sparkline(QWidget):
         pen = QPen(QColor(self.color))
         pen.setWidthF(1.6)
         p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
         p.drawPath(line)
 
         p.setPen(Qt.PenStyle.NoPen)
