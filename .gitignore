@@ -1,0 +1,26 @@
+# ── build artifacts ─────────────────────────────
+venv/
+build/
+dist/
+*.egg-info/
+setup.py          # ถูก generate ใหม่ทุกครั้งโดย install.sh
+*.dmg
+dmg_staging/
+icon.iconset/
+
+# ── Python ──────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.so
+
+# ── macOS ───────────────────────────────────────
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# ── local config / secrets ──────────────────────
+.claude_usage_widget.json
+*.pem
+*.p12
+.env
