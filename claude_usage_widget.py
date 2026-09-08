@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty,
-    QThread, pyqtSignal
+    QThread, pyqtSignal, QElapsedTimer
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QFont, QPainterPath, QAction, QIcon,
@@ -53,11 +53,16 @@ POLL_MAX_MS    = 300_000     # เพดาน backoff 5 นาที
 UI_TICK_MS     = 15_000      # อัปเดตข้อความนับถอยหลัง (ไม่ยิงเน็ต)
 CONFIG_PATH = os.path.expanduser("~/.claude_usage_widget.json")
 ICON_PATH = os.path.expanduser("~/.claude_usage_widget_icon.png")
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 REPO = "jomzonza38/ClaudeUsageApp"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{REPO}/releases/latest"
 NOTIFY_AT = 90          # แจ้งเตือนเมื่อใช้ถึงกี่ %
+HEADER_ZONE = 58        # ความสูงของ 'ส่วนหัว' ที่ดับเบิลคลิกแล้วย่อลงขอบ
+ACTIVE_TTL_S = 900      # ถือว่าโมเดลยัง 'กำลังใช้' อยู่กี่วินาทีหลังเห็นโควตาขยับ
+NEWS_URL = "https://www.anthropic.com/news"
+NEWS_BASE = "https://www.anthropic.com/news/"
+NEWS_INTERVAL_MS = 6 * 60 * 60 * 1000   # เช็คข่าวทุก 6 ชั่วโมง
 
 SLIDER_QSS = """
 QSlider::groove:horizontal { height: 4px; background: #3f3b58; border-radius: 2px; }
@@ -70,6 +75,8 @@ QSlider::sub-page:horizontal { background: #7a6fd6; border-radius: 2px; }
 """
 
 SNAP_THRESHOLD = 40
+ANIM_FPS_MS = 33        # ~30 fps
+CRAB_CYCLE_MS = 1400    # ครบหนึ่งรอบการขยับกี่มิลลิวินาที
 ANIM_MS = 280
 
 BG = QColor(22, 20, 32)
@@ -160,6 +167,12 @@ STRINGS = {
                               "5.  Paste it below"},
     "welcome_safe":    {"th": "เก็บไว้ใน macOS Keychain เท่านั้น ไม่ได้เขียนลงไฟล์ใด ๆ",
                         "en": "Stored in the macOS Keychain only, never written to disk"},
+    "menu_idle_on":    {"th": "ซ่อนโมเดลที่ยังไม่ได้ใช้: เปิด",
+                        "en": "Hide unused models: on"},
+    "menu_idle_off":   {"th": "ซ่อนโมเดลที่ยังไม่ได้ใช้: ปิด",
+                        "en": "Hide unused models: off"},
+    "active_now":      {"th": "กำลังใช้", "en": "in use"},
+    "news_title":      {"th": "ข่าวใหม่จาก Anthropic", "en": "New from Anthropic"},
 }
 
 
@@ -276,43 +289,62 @@ def pretty_label(key):
     return (f"{prefix}{name}", VIOLET)
 
 
+def crab_phase(clock):
+    """เฟส 0..1 ของรอบการขยับ อิงเวลาจริง — ไม่กระตุกแม้ timer จะมาไม่ตรงเป๊ะ"""
+    return (clock.elapsed() % CRAB_CYCLE_MS) / CRAB_CYCLE_MS
+
+
+def draw_crab(p, phase, ox, oy, s, color=None):
+    """วาดปูพิกเซลด้วยพิกัดทศนิยม ให้ขยับแบบ sub-pixel (ลื่นกว่าขยับทีละพิกเซล)"""
+    import math
+    tau = 2 * math.pi
+    bob = math.sin(phase * tau) * 2.2 * (s / 3.0)
+    sway = math.sin(phase * tau + math.pi / 2) * 1.15 * (s / 3.0)
+    # ตัวยืด/หดเล็กน้อยตามจังหวะ ทำให้ดูมีน้ำหนัก
+    squash = 1.0 + math.sin(phase * tau) * 0.035
+
+    p.setBrush(QBrush(color or ORANGE))
+    for y, row in enumerate(CRAB):
+        for x, ch in enumerate(row):
+            if ch != "X":
+                continue
+            dx = sway if y >= 5 else sway * 0.25   # ขาแกว่งมาก ตัวแกว่งตาม
+            h = s * squash
+            # เผื่อขอบ 0.6 กันเห็นรอยต่อระหว่างพิกเซลตอนเปิด antialiasing
+            p.drawRect(QRectF(ox + x * s + dx, oy + y * h + bob, s + 0.6, h + 0.6))
+
+
 class CrabIcon(QWidget):
     """โลโก้พิกเซล ขยับขึ้นลงเบาๆ + ขาแกว่ง"""
 
     def __init__(self, scale=3):
         super().__init__()
         self.scale = scale
-        self.frame = 0
         self.setFixedSize(9 * scale, 7 * scale + 8)
+        self.clock = QElapsedTimer()
+        self.clock.start()
         self.anim = QTimer(self)
-        self.anim.timeout.connect(self._step)
-        self.anim.start(140)
-
-    def _step(self):
-        self.frame = (self.frame + 1) % 8
-        self.update()
+        self.anim.timeout.connect(self.update)
+        self.anim.start(ANIM_FPS_MS)
 
     def paintEvent(self, _):
         import math
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
         s = self.scale
-        bob = math.sin(self.frame / 8 * 2 * math.pi) * 2.2
-        sway = 1 if self.frame in (2, 3, 6, 7) else 0
+        phase = crab_phase(self.clock)
 
-        # เงาเรืองแสงจางๆ
+        # เงาเรืองแสง หายใจตามจังหวะเดียวกับตัวปู
         glow = QColor(ORANGE)
-        glow.setAlpha(30)
+        glow.setAlpha(int(24 + 16 * (0.5 + 0.5 * math.sin(phase * 2 * math.pi))))
         p.setBrush(QBrush(glow))
-        p.drawEllipse(QRectF(1, self.height() - 7, self.width() - 2, 6))
+        squeeze = 1.0 - math.sin(phase * 2 * math.pi) * 0.12
+        gw = (self.width() - 2) * squeeze
+        p.drawEllipse(QRectF(1 + (self.width() - 2 - gw) / 2,
+                             self.height() - 7, gw, 6))
 
-        p.setBrush(QBrush(ORANGE))
-        for y, row in enumerate(CRAB):
-            for x, ch in enumerate(row):
-                if ch != "X":
-                    continue
-                dx = sway * s if y >= 5 else 0  # แถวล่าง = ขา ให้แกว่ง
-                p.drawRect(int(x * s + dx), int(y * s + bob + 4), s, s)
+        draw_crab(p, phase, 0, 4, s)
 
 
 def notify(body, title=None):
@@ -351,6 +383,61 @@ class UpdateChecker(QThread):
             tag = (r.json() or {}).get("tag_name") or ""
             if tag and version_tuple(tag) > version_tuple(VERSION):
                 self.found.emit(tag)
+        except Exception:
+            pass
+
+
+def slug_title(slug):
+    """'model-hardware-standard' -> 'Model Hardware Standard'"""
+    small = {"and", "or", "of", "for", "the", "a", "an", "to", "with", "on", "in"}
+    words = []
+    for i, w in enumerate(slug.split("-")):
+        words.append(w if (i and w in small) else w.capitalize())
+    return " ".join(words)
+
+
+class NewsChecker(QThread):
+    """ดูหน้าข่าวของ Anthropic ว่ามีหัวข้อใหม่ไหม
+
+    ตอนนี้เว็บไม่มี RSS ให้ใช้ เลยต้องอ่านลิงก์จาก HTML ตรง ๆ
+    ถ้าเว็บเปลี่ยนโครงสร้างเมื่อไหร่ ฟีเจอร์นี้จะเงียบไปเฉย ๆ ไม่ทำให้แอปพัง
+    """
+
+    found = pyqtSignal(list)   # [(slug, title), ...] เฉพาะอันที่ยังไม่เคยเห็น
+
+    def __init__(self, seen, parent=None):
+        super().__init__(parent)
+        self.seen = set(seen or [])
+
+    def run(self):
+        try:
+            import re as _re
+            r = requests.get(
+                NEWS_URL, timeout=12,
+                headers={"User-Agent": f"claude-usage-widget/{VERSION}"},
+            )
+            if r.status_code != 200:
+                return
+
+            # เว็บอาจเขียนลิงก์ได้หลายแบบ ลองไล่จากเจาะจงที่สุดไปหลวมที่สุด
+            patterns = [
+                r'href="(?:https?://(?:www\.)?anthropic\.com)?/news/([a-z0-9][a-z0-9\-]{3,80})"',
+                r'\\"(?:/news/)([a-z0-9][a-z0-9\-]{3,80})\\"',   # ลิงก์ที่ถูก escape ใน JSON
+                r'/news/([a-z0-9][a-z0-9\-]{3,80})',
+            ]
+            slugs = []
+            for pat in patterns:
+                for m in _re.finditer(pat, r.text):
+                    slug = m.group(1)
+                    if slug not in slugs:
+                        slugs.append(slug)
+                if slugs:
+                    break
+            if not slugs:
+                return
+
+            fresh = [x for x in slugs[:12] if x not in self.seen]
+            self.found.emit([(x, slug_title(x)) for x in fresh])
         except Exception:
             pass
 
@@ -557,15 +644,12 @@ class EdgeTab(QWidget):
         self.setWindowOpacity(0.0)
         self.fade = QPropertyAnimation(self, b"windowOpacity")
         self.fade.setDuration(200)
-        self.frame = 0
         self.remain = None      # % ที่เหลือของลิมิตที่ตึงที่สุด (None = ยังไม่มีข้อมูล)
+        self.clock = QElapsedTimer()
+        self.clock.start()
         self.anim = QTimer(self)
-        self.anim.timeout.connect(self._step)
-        self.anim.start(140)
-
-    def _step(self):
-        self.frame = (self.frame + 1) % 8
-        self.update()
+        self.anim.timeout.connect(self.update)
+        self.anim.start(ANIM_FPS_MS)
 
     def set_remain(self, pct):
         """ตั้งค่า % ที่เหลือ ให้แสดงบนแท็บตอนย่อไปขอบจอ"""
@@ -580,7 +664,6 @@ class EdgeTab(QWidget):
         self.fade.start()
 
     def paintEvent(self, _):
-        import math
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
@@ -594,17 +677,9 @@ class EdgeTab(QWidget):
             ox = 8
         p.fillPath(path, QBrush(BG))
 
-        # โลโก้พิกเซลกลางแท็บ ขยับเบาๆ
-        s_ = 2
-        bob = math.sin(self.frame / 8 * 2 * math.pi) * 1.6
-        sway = 1 if self.frame in (2, 3, 6, 7) else 0
-        p.setBrush(QBrush(ORANGE))
-        for y, row in enumerate(CRAB):
-            for x, ch in enumerate(row):
-                if ch != "X":
-                    continue
-                dx = sway * s_ if y >= 5 else 0
-                p.drawRect(int(ox + x * s_ + dx), int(24 + y * s_ + bob), s_, s_)
+        # โลโก้พิกเซลกลางแท็บ ใช้เฟสชุดเดียวกับตัวเต็มจอ
+        phase = crab_phase(self.clock)
+        draw_crab(p, phase, ox, 24, 2)
 
         if self.remain is None:
             # ยังไม่มีข้อมูล — แสดงจุดสถานะไปก่อน
@@ -961,6 +1036,12 @@ class UsageWidget(QWidget):
         self.fail_streak = 0        # จำนวน error ติดกัน ใช้คำนวณ backoff
         self.last_entries = []      # ข้อมูลล่าสุด ไว้ต่ออายุข้อความนับถอยหลัง
         self.last_peak = None       # % ที่ใช้ไปของลิมิตที่ตึงที่สุด
+        self.hide_idle = cfg0.get("hide_idle", True)
+        self.prev_util = {}         # ค่าครั้งก่อนของแต่ละ key ไว้ดูว่าอันไหนขยับ
+        self.active_model = None    # key ของโมเดลที่โควตาเพิ่งขยับ
+        self.active_at = None       # เห็นครั้งล่าสุดเมื่อไหร่
+        self.last_raw = []          # ข้อมูลดิบก่อนกรอง ไว้วาดใหม่ตอนสลับตัวกรอง
+        self.news = None
 
         self.layout_main = QVBoxLayout(self)
         self.layout_main.setContentsMargins(20, 16, 20, 14)
@@ -1083,6 +1164,12 @@ class UsageWidget(QWidget):
 
         # เช็คอัปเดตครั้งเดียวหลังเปิดแอป 5 วินาที (ไม่รบกวนตอนเริ่ม)
         QTimer.singleShot(5000, self._check_update)
+
+        # เช็คข่าวหลังเปิด 20 วิ แล้วทุก 6 ชั่วโมง
+        QTimer.singleShot(20000, self._check_news)
+        self.news_timer = QTimer(self)
+        self.news_timer.timeout.connect(self._check_news)
+        self.news_timer.start(NEWS_INTERVAL_MS)
 
         if cfg.get("hidden_side"):
             QTimer.singleShot(150, lambda: self.hide_to_edge(cfg["hidden_side"], animate=False))
@@ -1298,6 +1385,13 @@ class UsageWidget(QWidget):
             cfg["x"], cfg["y"] = self.x(), self.y()
             save_config(cfg)
 
+    def mouseDoubleClickEvent(self, e):
+        """ดับเบิลคลิกที่ส่วนหัว = ย่อไปขอบขวา"""
+        if e.position().y() <= HEADER_ZONE:
+            self.hide_to_edge("right")
+        else:
+            super().mouseDoubleClickEvent(e)
+
     def contextMenuEvent(self, e):
         menu = QMenu(self)
         menu.setFont(thai_font(12))
@@ -1314,9 +1408,12 @@ class UsageWidget(QWidget):
         a_notify = QAction(
             T("menu_notify_on") if self.notify_on else T("menu_notify_off"), self)
         a_notify.triggered.connect(self.toggle_notify)
+        a_idle = QAction(T("menu_idle_on") if self.hide_idle else T("menu_idle_off"), self)
+        a_idle.triggered.connect(self.toggle_hide_idle)
         menu.addAction(a_settings)
         menu.addAction(a_tray)
         menu.addAction(a_notify)
+        menu.addAction(a_idle)
         menu.addSeparator()
         a_clear = QAction(T("menu_clear"), self)
         a_clear.triggered.connect(self.clear_key)
@@ -1398,7 +1495,12 @@ class UsageWidget(QWidget):
         icon = QIcon(self._tray_pixmap(peak))
         icon.setIsMask(True)
         self.tray.setIcon(icon)
-        self.tray.setToolTip(f"{T('notify_title')} — {int(round(peak))}%")
+        tip = f"{T('notify_title')} — {int(round(peak))}%"
+        if self.active_model:
+            name, _ = pretty_label(self.active_model)
+            name = name.split("·")[-1].strip()
+            tip += f"  ({name} {T('active_now')})"
+        self.tray.setToolTip(tip)
 
     def toggle_tray(self):
         self.tray_on = not self.tray_on
@@ -1411,6 +1513,14 @@ class UsageWidget(QWidget):
         save_config(cfg)
 
     # ---------- แจ้งเตือน ----------
+
+    def toggle_hide_idle(self):
+        self.hide_idle = not self.hide_idle
+        cfg = load_config()
+        cfg["hide_idle"] = self.hide_idle
+        save_config(cfg)
+        if self.last_raw:
+            self._render(self.last_raw)
 
     def toggle_notify(self):
         self.notify_on = not self.notify_on
@@ -1448,6 +1558,32 @@ class UsageWidget(QWidget):
         self.footer.setText(f"{T('update_found')}: {tag}")
         self.footer.show()
 
+    # ---------- ข่าวจาก Anthropic ----------
+
+    def _check_news(self):
+        if self.news is not None and self.news.isRunning():
+            return
+        self.news = NewsChecker(load_config().get("news_seen", []), self)
+        self.news.found.connect(self._on_news)
+        self.news.start()
+
+    def _on_news(self, items):
+        cfg = load_config()
+        seen = list(cfg.get("news_seen", []))
+        first_run = not seen
+
+        if items:
+            seen.extend(slug for slug, _ in items)
+            cfg["news_seen"] = seen[-60:]
+            save_config(cfg)
+
+        # ครั้งแรกแค่จำรายการไว้ ไม่เด้งแจ้งเตือนรัวทีเดียวสิบกว่าอัน
+        if first_run or not items or not self.notify_on:
+            return
+
+        for slug, title in items[:3]:
+            notify(f"{title}\n{NEWS_BASE}{slug}", T("news_title"))
+
     def clear_key(self):
         try:
             keyring.delete_password(SERVICE_NAME, ACCOUNT_NAME)
@@ -1469,6 +1605,8 @@ class UsageWidget(QWidget):
 
         for idx, (key, node) in enumerate(entries):
             label, color = pretty_label(key)
+            if key == self.active_model:
+                label = f"● {label}"   # โควตาของอันนี้เพิ่งขยับ = น่าจะกำลังใช้อยู่
             if key not in self.rows:
                 row = Row(label, color)
                 self.rows[key] = row
@@ -1523,8 +1661,9 @@ class UsageWidget(QWidget):
                 continue
             entries.append((key, node))
 
-        self.last_entries = entries
-        self.sync_rows(entries)
+        self._track_active(entries)
+        self.last_raw = entries
+        self._render(entries)
         self.footer.hide()
 
         self._push_history(entries)
@@ -1536,6 +1675,40 @@ class UsageWidget(QWidget):
         self._update_tray(peak)
         self._maybe_notify(entries)
         self._schedule(POLL_BUSY_MS if peak >= 80 else POLL_NORMAL_MS)
+
+    def _render(self, entries):
+        """คัดแถวที่จะแสดงตามการตั้งค่า แล้ววาด"""
+        shown = entries
+        if self.hide_idle:
+            shown = [(k, n) for k, n in entries if (n.get("utilization") or 0) > 0]
+            if not shown:
+                # เพิ่งรีเซ็ตจนเป็นศูนย์หมด — เหลือสองอันหลักไว้ ไม่ให้การ์ดว่างเปล่า
+                shown = [(k, n) for k, n in entries if k in ("five_hour", "seven_day")]
+        self.last_entries = shown
+        self.sync_rows(shown)
+
+    def _track_active(self, entries):
+        """เดาว่ากำลังใช้โมเดลไหน จากการดูว่าโควตาของใครขยับขึ้น
+
+        API ไม่ได้บอกตรง ๆ ว่ากำลังใช้อะไรอยู่ อันนี้เป็นการอนุมาน
+        จึงจับได้เฉพาะช่วงที่แอปเปิดอยู่และโควตากำลังเดินจริง
+        """
+        now = datetime.now(timezone.utc).timestamp()
+        best, gain = None, 0.0
+        for k, n in entries:
+            if k in ("five_hour", "seven_day"):
+                continue
+            v = n.get("utilization") or 0
+            prev = self.prev_util.get(k)
+            if prev is not None and (v - prev) > gain + 1e-9:
+                best, gain = k, v - prev
+
+        if best:
+            self.active_model, self.active_at = best, now
+        elif self.active_at is not None and now - self.active_at > ACTIVE_TTL_S:
+            self.active_model, self.active_at = None, None
+
+        self.prev_util = {k: (n.get("utilization") or 0) for k, n in entries}
 
     def _on_expired(self):
         self.footer.setText(T("session_expired"))
@@ -1586,6 +1759,8 @@ class UsageWidget(QWidget):
             self.worker.wait(3000)
         if self.updater is not None and self.updater.isRunning():
             self.updater.wait(3000)
+        if self.news is not None and self.news.isRunning():
+            self.news.wait(3000)
         self._destroy_tray()
 
 def setup_macos_behavior(widgets):
