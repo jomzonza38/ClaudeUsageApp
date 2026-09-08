@@ -31,7 +31,7 @@ except ImportError:
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QMenu, QInputDialog, QMessageBox, QLineEdit, QSlider, QPushButton,
-    QSystemTrayIcon,
+    QSystemTrayIcon, QDialog, QDialogButtonBox,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty,
@@ -146,6 +146,20 @@ STRINGS = {
     "menu_show":       {"th": "แสดง widget",         "en": "Show widget"},
     "notify_title":    {"th": "Claude Usage",        "en": "Claude Usage"},
     "update_found":    {"th": "มีเวอร์ชันใหม่",       "en": "Update available"},
+    "welcome_title":   {"th": "ต้องใส่ sessionKey ก่อนเริ่มใช้งาน",
+                        "en": "sessionKey required to start"},
+    "welcome_steps":   {"th": "1.  เปิด claude.ai ในเบราว์เซอร์ แล้วล็อกอินให้เรียบร้อย\n"
+                              "2.  กด ⌘ + ⌥ + I เพื่อเปิด DevTools\n"
+                              "3.  ไปแท็บ Application → Cookies → https://claude.ai\n"
+                              "4.  หาแถว sessionKey แล้วคัดลอกค่าในช่อง Value\n"
+                              "5.  วางลงในช่องด้านล่าง",
+                        "en": "1.  Open claude.ai in your browser and sign in\n"
+                              "2.  Press ⌘ + ⌥ + I to open DevTools\n"
+                              "3.  Go to Application → Cookies → https://claude.ai\n"
+                              "4.  Find the sessionKey row and copy its Value\n"
+                              "5.  Paste it below"},
+    "welcome_safe":    {"th": "เก็บไว้ใน macOS Keychain เท่านั้น ไม่ได้เขียนลงไฟล์ใด ๆ",
+                        "en": "Stored in the macOS Keychain only, never written to disk"},
 }
 
 
@@ -756,6 +770,117 @@ class FetchWorker(QThread):
             self.failed.emit(type(ex).__name__)
 
 
+class Sparkline(QWidget):
+    """กราฟเส้นเล็ก ๆ แสดงแนวโน้มการใช้งานย้อนหลัง"""
+
+    def __init__(self, color=LIME):
+        super().__init__()
+        self.color = QColor(color)
+        self.points = []
+        self.setFixedHeight(30)
+        self.hide()
+
+    def set_points(self, pts):
+        self.points = [float(v) for v in pts][-60:]
+        self.setVisible(len(self.points) >= 2)
+        self.update()
+
+    def paintEvent(self, _):
+        if len(self.points) < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h, pad = self.width(), self.height(), 3.0
+        lo, hi = min(self.points), max(self.points)
+        span = max(hi - lo, 1.0)
+        n = len(self.points)
+        xs = [pad + (w - 2 * pad) * i / (n - 1) for i in range(n)]
+        ys = [h - pad - (h - 2 * pad) * (v - lo) / span for v in self.points]
+
+        line = QPainterPath()
+        line.moveTo(xs[0], ys[0])
+        for i in range(1, n):
+            line.lineTo(xs[i], ys[i])
+
+        area = QPainterPath(line)
+        area.lineTo(xs[-1], h)
+        area.lineTo(xs[0], h)
+        area.closeSubpath()
+        fill = QColor(self.color)
+        fill.setAlpha(38)
+        p.fillPath(area, QBrush(fill))
+
+        pen = QPen(QColor(self.color))
+        pen.setWidthF(1.6)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(line)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(self.color)))
+        p.drawEllipse(QRectF(xs[-1] - 2.5, ys[-1] - 2.5, 5, 5))
+
+
+class KeyDialog(QDialog):
+    """หน้าต้อนรับตอนใส่ sessionKey ครั้งแรก — บอกวิธีหาเป็นขั้นตอน"""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Claude Usage Widget")
+        self.setFixedWidth(430)
+        self.setStyleSheet(
+            f"QDialog {{ background: {BG.name()}; }}"
+            "QLabel { color: #efeaff; background: transparent; }"
+            "QLineEdit { background: #2a2740; color: #efeaff; border: 1px solid #4a4568;"
+            "            border-radius: 6px; padding: 7px 9px; }"
+            "QPushButton { background: #3f3b58; color: #efeaff; border: 0;"
+            "              border-radius: 6px; padding: 7px 18px; }"
+            "QPushButton:default { background: #7a6fd6; }"
+        )
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(26, 22, 26, 20)
+        lay.setSpacing(13)
+
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head.addWidget(CrabIcon(3))
+        title = QLabel(T("welcome_title"))
+        title.setFont(thai_font(15, QFont.Weight.DemiBold))
+        head.addWidget(title, 1)
+        lay.addLayout(head)
+
+        steps = QLabel(T("welcome_steps"))
+        steps.setFont(thai_font(12))
+        steps.setStyleSheet("color: #c7bfe8; background: transparent; line-height: 160%;")
+        steps.setWordWrap(True)
+        lay.addWidget(steps)
+
+        self.field = QLineEdit()
+        self.field.setEchoMode(QLineEdit.EchoMode.Password)
+        self.field.setPlaceholderText("sk-ant-sid01-…")
+        self.field.setFont(thai_font(12))
+        lay.addWidget(self.field)
+
+        safe = QLabel("🔒  " + T("welcome_safe"))
+        safe.setFont(thai_font(10))
+        safe.setStyleSheet("color: #8b83ad; background: transparent;")
+        safe.setWordWrap(True)
+        lay.addWidget(safe)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
+        lay.addWidget(buttons)
+
+        self.field.returnPressed.connect(self.accept)
+
+    def key(self):
+        return self.field.text().strip()
+
+
 class UsageWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -845,6 +970,9 @@ class UsageWidget(QWidget):
         self.rows_container.setSpacing(14)
         self.layout_main.addLayout(self.rows_container)
 
+        self.spark = Sparkline(LIME)
+        self.layout_main.addWidget(self.spark)
+
         self.footer = QLabel("")
         self.footer.setStyleSheet("color: #e2aa46; background: transparent;")
         self.footer.setFont(thai_font(11))
@@ -912,6 +1040,10 @@ class UsageWidget(QWidget):
         )
         self.keep_top.start(3000)
 
+        hist0 = load_config().get("history", [])
+        if hist0:
+            self.spark.set_points([h[1] for h in hist0])
+
         self.refresh()
 
         if self.tray_on:
@@ -927,14 +1059,10 @@ class UsageWidget(QWidget):
         key = keyring.get_password(SERVICE_NAME, ACCOUNT_NAME)
         if key:
             return key
-        key, ok = QInputDialog.getText(
-            None, "Claude Usage Widget",
-            T("paste_key"),
-            QLineEdit.EchoMode.Password,
-        )
-        if ok and key.strip():
-            keyring.set_password(SERVICE_NAME, ACCOUNT_NAME, key.strip())
-            return key.strip()
+        dlg = KeyDialog()
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.key():
+            keyring.set_password(SERVICE_NAME, ACCOUNT_NAME, dlg.key())
+            return dlg.key()
         return None
 
     def _rgb_step(self):
@@ -1131,7 +1259,10 @@ class UsageWidget(QWidget):
     def mouseReleaseEvent(self, _):
         self._drag_pos = None
         if not self.check_snap():
-            save_config({"x": self.x(), "y": self.y()})
+            # ต้อง merge เข้าของเดิม ไม่งั้นค่าตั้งอื่นหายหมดทุกครั้งที่ลากย้าย
+            cfg = load_config()
+            cfg["x"], cfg["y"] = self.x(), self.y()
+            save_config(cfg)
 
     def contextMenuEvent(self, e):
         menu = QMenu(self)
@@ -1362,6 +1493,8 @@ class UsageWidget(QWidget):
         self.sync_rows(entries)
         self.footer.hide()
 
+        self._push_history(entries)
+
         peak = max((n.get("utilization") or 0) for _, n in entries) if entries else 0
         self._update_tray(peak)
         self._maybe_notify(entries)
@@ -1379,6 +1512,29 @@ class UsageWidget(QWidget):
         self.footer.show()
         delay = min(POLL_ERROR_MS * (2 ** (self.fail_streak - 1)), POLL_MAX_MS)
         self._schedule(delay)
+
+    def _push_history(self, entries):
+        """เก็บค่าการใช้งานรายสัปดาห์ไว้วาดกราฟ — เก็บทุก 10 นาที ย้อนหลัง 7 วัน"""
+        d = dict(entries)
+        node = d.get("seven_day") or d.get("five_hour")
+        if not node:
+            return
+        pct = node.get("utilization")
+        if pct is None:
+            return
+
+        cfg = load_config()
+        hist = [h for h in cfg.get("history", []) if isinstance(h, list) and len(h) == 2]
+        now = int(datetime.now(timezone.utc).timestamp())
+        if hist and now - hist[-1][0] < 600:
+            hist[-1] = [now, pct]          # ยังอยู่ในช่วง 10 นาทีเดิม อัปเดตจุดล่าสุด
+        else:
+            hist.append([now, pct])
+        hist = [h for h in hist if now - h[0] <= 7 * 24 * 3600][-120:]
+
+        cfg["history"] = hist
+        save_config(cfg)
+        self.spark.set_points([h[1] for h in hist])
 
     def _retick_labels(self):
         """ต่ออายุข้อความ 'รีเซ็ตอีก …' จากข้อมูลเดิม โดยไม่ยิงเน็ตซ้ำ"""
