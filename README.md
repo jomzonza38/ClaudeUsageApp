@@ -122,6 +122,31 @@ chmod +x make_dmg.sh
 
 ได้ไฟล์ `ClaudeUsage-<version>.dmg` ที่ผู้รับเปิดแล้วลากแอปไปใส่ Applications ได้เลย
 
+### เซ็นชื่อ + notarize (แนะนำถ้าจะแจกให้คนอื่น)
+
+ไฟล์ที่ไม่ได้เซ็นจะโดน Gatekeeper บล็อกที่เครื่องปลายทาง ต้องสอนให้คลิกขวา → Open ทุกครั้ง
+ถ้ามีบัญชี Apple Developer ใช้ `notarize.sh` จบปัญหานี้ได้:
+
+```bash
+./install.sh --build-only
+SIGN_ID="Developer ID Application: ชื่อคุณ (TEAMID)" ./notarize.sh
+```
+
+สคริปต์จะเซ็นไฟล์ย่อยทั้งหมด → เซ็นแอป → ทำ dmg → ส่งให้ Apple ตรวจ → staple ผลติดไฟล์
+วิธีเตรียม certificate กับ credential อ่านได้ที่หัวไฟล์ `notarize.sh`
+
+### ปล่อยเวอร์ชันใหม่อัตโนมัติ
+
+`.github/workflows/build.yml` จะ build `.dmg` แล้วแนบเข้า GitHub Release ให้เองเมื่อ push tag:
+
+```bash
+git tag v1.4.0
+git push origin v1.4.0
+```
+
+> ไฟล์จาก CI ยังไม่ได้เซ็น (certificate อยู่ในเครื่องคุณ ไม่ได้อยู่บน runner)
+> ถ้าจะแจกจริงจัง ให้ใช้ `notarize.sh` บนเครื่องแล้วอัปโหลดทับ
+
 ## ปัญหาที่เจอบ่อย
 
 **ดับเบิลคลิก `Install.command` แล้วไม่มีอะไรเกิดขึ้น / ขึ้นว่าเปิดไม่ได้**

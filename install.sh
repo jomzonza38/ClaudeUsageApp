@@ -24,6 +24,10 @@ fail()  { echo -e "${RED}✗${NC} $1"; exit 1; }
 
 cd "$WORKDIR"
 
+# --build-only (หรือมีตัวแปร CI) = build อย่างเดียว ไม่ติดตั้ง ไม่ถามอะไร
+BUILD_ONLY=0
+[[ "${1:-}" == "--build-only" || -n "${CI:-}" ]] && BUILD_ONLY=1
+
 # ---------- ตรวจสภาพแวดล้อม ----------
 [[ "$(uname)" == "Darwin" ]] || fail "สคริปต์นี้ใช้ได้เฉพาะ macOS"
 command -v python3 >/dev/null || fail "ไม่พบ python3 — ติดตั้งจาก https://www.python.org ก่อน"
@@ -134,6 +138,14 @@ python setup.py py2app -q 2>&1 | grep -Ei "error|warning: mod" || true
 
 SIZE=$(du -sh "dist/$APP_NAME.app" | cut -f1)
 info "build สำเร็จ ($SIZE)"
+
+# ---------- โหมด CI: จบแค่ build ----------
+if [[ $BUILD_ONLY -eq 1 ]]; then
+    echo
+    info "build อย่างเดียวตามที่สั่ง — ข้ามการติดตั้งลง /Applications"
+    echo " ผลลัพธ์: dist/$APP_NAME.app ($SIZE)"
+    exit 0
+fi
 
 # ---------- ติดตั้ง ----------
 if [[ -d "/Applications/$APP_NAME.app" ]]; then

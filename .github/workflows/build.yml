@@ -1,0 +1,49 @@
+name: build
+
+# ยิงเมื่อ push tag ที่ขึ้นต้นด้วย v เช่น v1.4.0
+# แล้วแนบ .dmg เข้า GitHub Release ให้อัตโนมัติ
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:      # กดรันเองได้จากหน้า Actions
+
+permissions:
+  contents: write         # ต้องมีเพื่อสร้าง Release
+
+jobs:
+  build:
+    runs-on: macos-14     # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: build .app
+        run: |
+          chmod +x install.sh make_dmg.sh
+          ./install.sh --build-only
+
+      - name: สร้าง .dmg
+        run: ./make_dmg.sh
+
+      - name: อัปโหลดเป็น artifact (ดาวน์โหลดได้แม้ไม่ได้ tag)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeUsage-dmg
+          path: "*.dmg"
+
+      - name: แนบเข้า Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.dmg"
+          generate_release_notes: true
+          body: |
+            ### ติดตั้ง
+            โหลด `.dmg` ด้านล่าง เปิดแล้วลากแอปไปใส่โฟลเดอร์ Applications
+
+            > ไฟล์จาก CI ยังไม่ได้ code sign — ครั้งแรกให้คลิกขวาที่แอป → Open
+            > หรือสั่ง `xattr -cr "/Applications/Claude Usage.app"`
+            > (เวอร์ชันที่ notarize แล้วจะไม่มีปัญหานี้)
