@@ -33,7 +33,8 @@ from PyQt6.QtWidgets import (
     QMenu, QInputDialog, QMessageBox, QLineEdit, QSlider, QPushButton,
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, QPoint, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty
+    Qt, QTimer, QPoint, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty,
+    QThread, pyqtSignal
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QFont, QPainterPath, QAction, QIcon,
@@ -43,7 +44,12 @@ from PyQt6.QtGui import (
 SERVICE_NAME = "claude-usage-bar"
 ACCOUNT_NAME = "sessionKey"
 BASE_URL = "https://claude.ai/api"
-REFRESH_MS = 5_000
+# คาบการดึงข้อมูล — โควตาไม่ได้ขยับเร็ว ไม่ต้องยิงถี่
+POLL_NORMAL_MS = 60_000      # ปกติ
+POLL_BUSY_MS   = 20_000      # ใช้ไปเกิน 80% แล้ว ดูถี่ขึ้น
+POLL_ERROR_MS  = 15_000      # ครั้งแรกหลัง error แล้วคูณสองไปเรื่อย
+POLL_MAX_MS    = 300_000     # เพดาน backoff 5 นาที
+UI_TICK_MS     = 15_000      # อัปเดตข้อความนับถอยหลัง (ไม่ยิงเน็ต)
 CONFIG_PATH = os.path.expanduser("~/.claude_usage_widget.json")
 ICON_PATH = os.path.expanduser("~/.claude_usage_widget_icon.png")
 VERSION = "1.3.1"
@@ -662,6 +668,42 @@ class SettingsPanel(QWidget):
         self._drag = None
 
 
+class FetchWorker(QThread):
+    """ดึงข้อมูลโควตาบน background thread — main thread จะได้ไม่ค้างตอนเน็ตหน่วง
+
+    ยิงทีละตัวเท่านั้น (UsageWidget กันไว้) requests.Session เลยใช้ร่วมกันได้ปลอดภัย
+    """
+
+    ok = pyqtSignal(object, object)   # (payload, org_id)
+    expired = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def __init__(self, http, org_id, parent=None):
+        super().__init__(parent)
+        self.http = http
+        self.org_id = org_id
+
+    def run(self):
+        try:
+            org_id = self.org_id
+            if not org_id:
+                r = self.http.get(f"{BASE_URL}/organizations", timeout=10)
+                r.raise_for_status()
+                orgs = r.json()
+                if not orgs:
+                    raise RuntimeError("ไม่พบ organization")
+                org_id = orgs[0]["uuid"]
+
+            r = self.http.get(f"{BASE_URL}/organizations/{org_id}/usage", timeout=10)
+            if r.status_code == 401:
+                self.expired.emit()
+                return
+            r.raise_for_status()
+            self.ok.emit(r.json(), org_id)
+        except Exception as ex:
+            self.failed.emit(type(ex).__name__)
+
+
 class UsageWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -702,6 +744,9 @@ class UsageWidget(QWidget):
         self.http.headers.update({"User-Agent": "claude-usage-widget/1.0"})
         self.org_id = None
         self.next_refresh = None
+        self.worker = None          # FetchWorker ที่กำลังทำงาน (None = ว่าง)
+        self.fail_streak = 0        # จำนวน error ติดกัน ใช้คำนวณ backoff
+        self.last_entries = []      # ข้อมูลล่าสุด ไว้ต่ออายุข้อความนับถอยหลัง
 
         self.layout_main = QVBoxLayout(self)
         self.layout_main.setContentsMargins(20, 16, 20, 14)
@@ -793,9 +838,15 @@ class UsageWidget(QWidget):
         if "x" in cfg and "y" in cfg:
             self.move(QPoint(cfg["x"], cfg["y"]))
 
+        # ตัวตั้งเวลาดึงข้อมูล — single-shot แล้วตั้งใหม่ทุกครั้งที่ได้ผลลัพธ์
         self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
         self.timer.timeout.connect(self.refresh)
-        self.timer.start(REFRESH_MS)
+
+        # ต่ออายุข้อความ "รีเซ็ตอีก …" โดยไม่ต้องยิงเน็ต
+        self.ui_tick = QTimer(self)
+        self.ui_tick.timeout.connect(self._retick_labels)
+        self.ui_tick.start(UI_TICK_MS)
 
         # ย้ำ window level เป็นระยะ กันโดนแอปอื่นทับ
         self.keep_top = QTimer(self)
@@ -1079,52 +1130,78 @@ class UsageWidget(QWidget):
         self.adjustSize()
 
     def refresh(self):
-        try:
-            if not self.org_id:
-                r = self.http.get(f"{BASE_URL}/organizations", timeout=10)
-                r.raise_for_status()
-                orgs = r.json()
-                if not orgs:
-                    raise RuntimeError("ไม่พบ organization")
-                self.org_id = orgs[0]["uuid"]
+        """เริ่มดึงข้อมูลรอบใหม่บน background thread — ไม่บล็อก UI"""
+        if self.worker is not None and self.worker.isRunning():
+            return  # รอบก่อนยังไม่จบ ข้ามไป กันยิงซ้อน
+        self.timer.stop()
+        self.worker = FetchWorker(self.http, self.org_id, self)
+        self.worker.ok.connect(self._on_data)
+        self.worker.expired.connect(self._on_expired)
+        self.worker.failed.connect(self._on_failed)
+        self.worker.finished.connect(self._on_worker_done)
+        self.worker.start()
 
-            r = self.http.get(f"{BASE_URL}/organizations/{self.org_id}/usage", timeout=10)
-            if r.status_code == 401:
-                self.footer.setText(T("session_expired"))
-                self.footer.show()
-                return
-            r.raise_for_status()
-            data = r.json()
+    def _on_worker_done(self):
+        w = self.sender()
+        if w is not None:
+            w.deleteLater()
+        self.worker = None
 
-            entries = []
-            # เรียง: 5-hour → weekly → per-model
-            order = ["five_hour", "seven_day"]
-            for key in order:
-                node = data.get(key)
-                if isinstance(node, dict) and node:
-                    entries.append((key, node))
-            for key, node in data.items():
-                if key in order:
-                    continue
-                if not isinstance(node, dict) or not node:
-                    continue
-                if node.get("utilization") is None:
-                    continue
+    def _schedule(self, ms):
+        """ตั้งเวลาดึงรอบถัดไป"""
+        self.timer.start(int(ms))
+
+    def _on_data(self, data, org_id):
+        self.org_id = org_id
+        self.fail_streak = 0
+
+        entries = []
+        # เรียง: 5-hour → weekly → per-model
+        order = ["five_hour", "seven_day"]
+        for key in order:
+            node = data.get(key)
+            if isinstance(node, dict) and node:
                 entries.append((key, node))
+        for key, node in data.items():
+            if key in order:
+                continue
+            if not isinstance(node, dict) or not node:
+                continue
+            if node.get("utilization") is None:
+                continue
+            entries.append((key, node))
 
-            # debug: ดูว่า API ส่ง key อะไรมาบ้าง (ลบทิ้งได้)
-            print("keys:", list(data.keys()))
+        self.last_entries = entries
+        self.sync_rows(entries)
+        self.footer.hide()
 
-            self.sync_rows(entries)
+        peak = max((n.get("utilization") or 0) for _, n in entries) if entries else 0
+        self._schedule(POLL_BUSY_MS if peak >= 80 else POLL_NORMAL_MS)
 
-            self.footer.hide()
+    def _on_expired(self):
+        self.footer.setText(T("session_expired"))
+        self.footer.show()
+        self._schedule(POLL_MAX_MS)
 
-        except Exception as ex:
-            self.footer.setText(f"ผิดพลาด: {type(ex).__name__}")
-            self.footer.show()
-            import traceback
-            traceback.print_exc()
+    def _on_failed(self, name):
+        """error ติดกันยิ่งเยอะ ยิ่งถอยห่าง (exponential backoff)"""
+        self.fail_streak += 1
+        self.footer.setText(f"ผิดพลาด: {name}")
+        self.footer.show()
+        delay = min(POLL_ERROR_MS * (2 ** (self.fail_streak - 1)), POLL_MAX_MS)
+        self._schedule(delay)
 
+    def _retick_labels(self):
+        """ต่ออายุข้อความ 'รีเซ็ตอีก …' จากข้อมูลเดิม โดยไม่ยิงเน็ตซ้ำ"""
+        if self.last_entries:
+            self.sync_rows(self.last_entries)
+
+    def shutdown(self):
+        """รอ worker จบก่อนปิดแอป กัน 'QThread destroyed while running'"""
+        self.timer.stop()
+        self.ui_tick.stop()
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.wait(3000)
 
 def setup_macos_behavior(widgets):
     """ทำให้ widget ลอยเหนือแอปอื่นตลอด และไม่โผล่ใน Dock/Cmd-Tab
@@ -1154,6 +1231,7 @@ if __name__ == "__main__":
     if os.path.exists(ICON_PATH):
         app.setWindowIcon(QIcon(ICON_PATH))
     w = UsageWidget()
+    app.aboutToQuit.connect(w.shutdown)
     w.show()
     QTimer.singleShot(200, lambda: setup_macos_behavior([w]))
     sys.exit(app.exec())
