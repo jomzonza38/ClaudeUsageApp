@@ -31,6 +31,7 @@ except ImportError:
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QMenu, QInputDialog, QMessageBox, QLineEdit, QSlider, QPushButton,
+    QSystemTrayIcon,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QRectF, QPropertyAnimation, QEasingCurve, pyqtProperty,
@@ -38,7 +39,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QBrush, QFont, QPainterPath, QAction, QIcon,
-    QConicalGradient, QPen,
+    QConicalGradient, QPen, QPixmap,
 )
 
 SERVICE_NAME = "claude-usage-bar"
@@ -53,6 +54,10 @@ UI_TICK_MS     = 15_000      # อัปเดตข้อความนับ�
 CONFIG_PATH = os.path.expanduser("~/.claude_usage_widget.json")
 ICON_PATH = os.path.expanduser("~/.claude_usage_widget_icon.png")
 VERSION = "1.3.1"
+REPO = "jomzonza38/ClaudeUsageApp"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES_URL = f"https://github.com/{REPO}/releases/latest"
+NOTIFY_AT = 90          # แจ้งเตือนเมื่อใช้ถึงกี่ %
 
 SLIDER_QSS = """
 QSlider::groove:horizontal { height: 4px; background: #3f3b58; border-radius: 2px; }
@@ -134,6 +139,13 @@ STRINGS = {
     "reset_done":      {"th": "รีเซ็ตแล้ว",          "en": "Reset"},
     "paste_key":       {"th": "วาง sessionKey ของคุณ (เก็บใน macOS Keychain):",
                         "en": "Paste your sessionKey (stored in macOS Keychain):"},
+    "menu_tray_on":    {"th": "แสดงบนแถบเมนู: เปิด",  "en": "Menu bar: on"},
+    "menu_tray_off":   {"th": "แสดงบนแถบเมนู: ปิด",   "en": "Menu bar: off"},
+    "menu_notify_on":  {"th": "แจ้งเตือนใกล้เต็ม: เปิด", "en": "Alerts: on"},
+    "menu_notify_off": {"th": "แจ้งเตือนใกล้เต็ม: ปิด",  "en": "Alerts: off"},
+    "menu_show":       {"th": "แสดง widget",         "en": "Show widget"},
+    "notify_title":    {"th": "Claude Usage",        "en": "Claude Usage"},
+    "update_found":    {"th": "มีเวอร์ชันใหม่",       "en": "Update available"},
 }
 
 
@@ -287,6 +299,46 @@ class CrabIcon(QWidget):
                     continue
                 dx = sway * s if y >= 5 else 0  # แถวล่าง = ขา ให้แกว่ง
                 p.drawRect(int(x * s + dx), int(y * s + bob + 4), s, s)
+
+
+def notify(body, title=None):
+    """แจ้งเตือนแบบ native ผ่าน osascript — ไม่บล็อก ล้มเหลวก็เงียบ"""
+    try:
+        import subprocess
+        title = title or T("notify_title")
+        subprocess.Popen(
+            ["osascript", "-e",
+             f"display notification {json.dumps(body)} with title {json.dumps(title)}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def version_tuple(v):
+    """'v1.4.0' -> (1, 4, 0) ใช้เทียบเวอร์ชัน ส่วนที่อ่านไม่ออกให้เป็น 0"""
+    nums = []
+    for part in str(v).lstrip("vV").split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        nums.append(int(digits) if digits else 0)
+    return tuple(nums[:3] + [0] * (3 - len(nums)))
+
+
+class UpdateChecker(QThread):
+    """ถาม GitHub Releases ว่ามีเวอร์ชันใหม่กว่าที่รันอยู่ไหม"""
+
+    found = pyqtSignal(str)   # tag ของเวอร์ชันใหม่
+
+    def run(self):
+        try:
+            r = requests.get(RELEASES_API, timeout=8)
+            if r.status_code != 200:
+                return
+            tag = (r.json() or {}).get("tag_name") or ""
+            if tag and version_tuple(tag) > version_tuple(VERSION):
+                self.found.emit(tag)
+        except Exception:
+            pass
 
 
 def read_battery():
@@ -730,6 +782,11 @@ class UsageWidget(QWidget):
         self.rgb_speed = cfg0.get("rgb_speed", 1.6)
         self.rgb_glow = cfg0.get("rgb_glow", 1.0)
         self.rgb_angle = 0.0
+        self.tray_on = cfg0.get("tray", False)
+        self.notify_on = cfg0.get("notify", True)
+        self.tray = None
+        self.updater = None
+        self.notified = set()   # (key, resets_at) ที่แจ้งเตือนไปแล้ว กันเตือนซ้ำ
         self.panel = None
         self.rgb_timer = QTimer(self)
         self.rgb_timer.timeout.connect(self._rgb_step)
@@ -856,6 +913,12 @@ class UsageWidget(QWidget):
         self.keep_top.start(3000)
 
         self.refresh()
+
+        if self.tray_on:
+            self._build_tray()
+
+        # เช็คอัปเดตครั้งเดียวหลังเปิดแอป 5 วินาที (ไม่รบกวนตอนเริ่ม)
+        QTimer.singleShot(5000, self._check_update)
 
         if cfg.get("hidden_side"):
             QTimer.singleShot(150, lambda: self.hide_to_edge(cfg["hidden_side"], animate=False))
@@ -1081,7 +1144,14 @@ class UsageWidget(QWidget):
         a_hide_r.triggered.connect(lambda: self.hide_to_edge("right"))
         a_settings = QAction(T("menu_settings"), self)
         a_settings.triggered.connect(self.open_settings)
+        a_tray = QAction(T("menu_tray_on") if self.tray_on else T("menu_tray_off"), self)
+        a_tray.triggered.connect(self.toggle_tray)
+        a_notify = QAction(
+            T("menu_notify_on") if self.notify_on else T("menu_notify_off"), self)
+        a_notify.triggered.connect(self.toggle_notify)
         menu.addAction(a_settings)
+        menu.addAction(a_tray)
+        menu.addAction(a_notify)
         menu.addSeparator()
         a_clear = QAction(T("menu_clear"), self)
         a_clear.triggered.connect(self.clear_key)
@@ -1095,6 +1165,123 @@ class UsageWidget(QWidget):
         menu.addAction(a_clear)
         menu.addAction(a_quit)
         menu.exec(e.globalPos())
+
+    # ---------- แถบเมนู (menu bar) ----------
+
+    def _tray_pixmap(self, peak):
+        """วาดตัวเลข % เป็นไอคอน template ให้ macOS ปรับสีตามธีมเอง"""
+        text = f"{int(round(peak))}%"
+        w, h, ratio = 42, 22, 2
+        pm = QPixmap(w * ratio, h * ratio)
+        pm.setDevicePixelRatio(ratio)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        f = QFont()
+        f.setPointSize(12)
+        f.setWeight(QFont.Weight.DemiBold)
+        p.setFont(f)
+        p.setPen(QColor(0, 0, 0))
+        p.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, text)
+        p.end()
+        return pm
+
+    def _build_tray(self):
+        if self.tray is not None:
+            return
+        self.tray = QSystemTrayIcon(self)
+        icon = QIcon(self._tray_pixmap(0))
+        icon.setIsMask(True)
+        self.tray.setIcon(icon)
+
+        m = QMenu()
+        m.setFont(thai_font(12))
+        a_show = QAction(T("menu_show"), self)
+        a_show.triggered.connect(self._show_from_tray)
+        a_refresh = QAction(T("menu_refresh"), self)
+        a_refresh.triggered.connect(self.refresh)
+        a_quit = QAction(T("menu_quit"), self)
+        a_quit.triggered.connect(QApplication.quit)
+        m.addAction(a_show)
+        m.addAction(a_refresh)
+        m.addSeparator()
+        m.addAction(a_quit)
+        self.tray.setContextMenu(m)
+        self.tray.show()
+        if self.last_entries:
+            self._update_tray(max((n.get("utilization") or 0)
+                                  for _, n in self.last_entries))
+
+    def _destroy_tray(self):
+        if self.tray is None:
+            return
+        self.tray.hide()
+        self.tray.deleteLater()
+        self.tray = None
+
+    def _show_from_tray(self):
+        if self.tab is not None:
+            self.reveal()
+        else:
+            self.show()
+            self.raise_()
+        setup_macos_behavior([self])
+
+    def _update_tray(self, peak):
+        if self.tray is None:
+            return
+        icon = QIcon(self._tray_pixmap(peak))
+        icon.setIsMask(True)
+        self.tray.setIcon(icon)
+        self.tray.setToolTip(f"{T('notify_title')} — {int(round(peak))}%")
+
+    def toggle_tray(self):
+        self.tray_on = not self.tray_on
+        if self.tray_on:
+            self._build_tray()
+        else:
+            self._destroy_tray()
+        cfg = load_config()
+        cfg["tray"] = self.tray_on
+        save_config(cfg)
+
+    # ---------- แจ้งเตือน ----------
+
+    def toggle_notify(self):
+        self.notify_on = not self.notify_on
+        cfg = load_config()
+        cfg["notify"] = self.notify_on
+        save_config(cfg)
+
+    def _maybe_notify(self, entries):
+        """เตือนครั้งเดียวต่อหนึ่งรอบรีเซ็ต เมื่อใช้ถึงเกณฑ์"""
+        if not self.notify_on:
+            return
+        for key, node in entries:
+            pct = node.get("utilization") or 0
+            if pct < NOTIFY_AT:
+                continue
+            stamp = (key, node.get("resets_at"))
+            if stamp in self.notified:
+                continue
+            self.notified.add(stamp)
+            label, _ = pretty_label(key)
+            left = humanize_reset(node.get("resets_at"))
+            notify(f"{label} — {int(round(pct))}%" + (f"\n{left}" if left else ""))
+
+    # ---------- เช็คอัปเดต ----------
+
+    def _check_update(self):
+        if self.updater is not None and self.updater.isRunning():
+            return
+        self.updater = UpdateChecker(self)
+        self.updater.found.connect(self._on_update_found)
+        self.updater.start()
+
+    def _on_update_found(self, tag):
+        notify(f"{T('update_found')}: {tag}\n{RELEASES_URL}")
+        self.footer.setText(f"{T('update_found')}: {tag}")
+        self.footer.show()
 
     def clear_key(self):
         try:
@@ -1176,6 +1363,8 @@ class UsageWidget(QWidget):
         self.footer.hide()
 
         peak = max((n.get("utilization") or 0) for _, n in entries) if entries else 0
+        self._update_tray(peak)
+        self._maybe_notify(entries)
         self._schedule(POLL_BUSY_MS if peak >= 80 else POLL_NORMAL_MS)
 
     def _on_expired(self):
@@ -1202,6 +1391,9 @@ class UsageWidget(QWidget):
         self.ui_tick.stop()
         if self.worker is not None and self.worker.isRunning():
             self.worker.wait(3000)
+        if self.updater is not None and self.updater.isRunning():
+            self.updater.wait(3000)
+        self._destroy_tray()
 
 def setup_macos_behavior(widgets):
     """ทำให้ widget ลอยเหนือแอปอื่นตลอด และไม่โผล่ใน Dock/Cmd-Tab
