@@ -11,10 +11,8 @@ Floating widget บนเดสก์ท็อป macOS สำหรับดู
 เขียนด้วย Python + PyQt6 แล้ว build เป็นแอป `.app` ด้วย py2app
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Claude Usage Widget" width="380">
+  <img src="myicon.png" alt="Claude Usage Widget" width="128">
 </p>
-
-> ยังไม่มีภาพ? ดูวิธีถ่ายที่หัวข้อ [ภาพประกอบ](#ภาพประกอบ) ด้านล่าง
 
 ## ฟีเจอร์
 
@@ -179,17 +177,30 @@ git push origin v1.4.0
 
 ## ภาพประกอบ
 
-README อ้างถึง `docs/screenshot.png` ถ้ายังไม่มี ถ่ายได้ด้วย:
+ตอนนี้หัว README ใช้ไอคอนแอปไปพลางก่อน ถ้าจะใส่ภาพจริง:
+
+**ภาพนิ่ง**
+
+1. กด `⌘ + ⇧ + 4` แล้วกด `Space` → เคอร์เซอร์เปลี่ยนเป็นรูปกล้อง
+2. คลิกที่ widget → ได้ภาพเฉพาะหน้าต่างพร้อมเงาโปร่งใส ไปอยู่บนเดสก์ท็อป
+3. ย้ายเข้าโปรเจกต์แล้วเปลี่ยน `myicon.png` ในหัว README เป็น `docs/screenshot.png`
 
 ```bash
 mkdir -p docs
-# ⌘ + ⇧ + 4 แล้วกด Space → คลิกที่ widget → ได้ภาพพร้อมเงาโปร่งใส
-# หรือถ่ายเป็นวิดีโอสั้นแล้วแปลงเป็น GIF:
-#   ⌘ + ⇧ + 5 → บันทึกส่วนที่เลือก → ได้ .mov
-#   ffmpeg -i screen.mov -vf "fps=15,scale=380:-1" -loop 0 docs/demo.gif
+mv ~/Desktop/"Screenshot "*.png docs/screenshot.png
 ```
 
-แนะนำให้ถ่ายตอนขอบ RGB กำลังหมุนและตอนเลื่อนซ่อนเข้าขอบจอ — สองอย่างนี้ต้องเห็นเป็นภาพเคลื่อนไหวถึงจะเข้าใจ
+**ภาพเคลื่อนไหว** (แนะนำ — ขอบ RGB กับจังหวะเลื่อนซ่อนต้องเห็นเคลื่อนไหวถึงจะเข้าใจ)
+
+```bash
+# ⌘ + ⇧ + 5 → บันทึกส่วนที่เลือก → กด Stop บนแถบเมนู → ได้ .mov บนเดสก์ท็อป
+brew install ffmpeg     # ถ้ายังไม่มี
+ffmpeg -i ~/Desktop/screen.mov -vf "fps=15,scale=380:-1:flags=lanczos" -loop 0 docs/demo.gif
+```
+
+แล้วเปลี่ยนบรรทัดภาพในหัว README เป็น `docs/demo.gif`
+
+> GIF ที่ยาวเกิน 10 วินาทีจะไฟล์ใหญ่มาก ตัดให้เหลือ 5-8 วินาทีกำลังดี
 
 ## License
 
