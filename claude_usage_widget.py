@@ -558,12 +558,18 @@ class EdgeTab(QWidget):
         self.fade = QPropertyAnimation(self, b"windowOpacity")
         self.fade.setDuration(200)
         self.frame = 0
+        self.remain = None      # % ที่เหลือของลิมิตที่ตึงที่สุด (None = ยังไม่มีข้อมูล)
         self.anim = QTimer(self)
         self.anim.timeout.connect(self._step)
         self.anim.start(140)
 
     def _step(self):
         self.frame = (self.frame + 1) % 8
+        self.update()
+
+    def set_remain(self, pct):
+        """ตั้งค่า % ที่เหลือ ให้แสดงบนแท็บตอนย่อไปขอบจอ"""
+        self.remain = None if pct is None else max(0.0, min(100.0, float(pct)))
         self.update()
 
     def fade_in(self):
@@ -598,13 +604,38 @@ class EdgeTab(QWidget):
                 if ch != "X":
                     continue
                 dx = sway * s_ if y >= 5 else 0
-                p.drawRect(int(ox + x * s_ + dx), int(31 + y * s_ + bob), s_, s_)
+                p.drawRect(int(ox + x * s_ + dx), int(24 + y * s_ + bob), s_, s_)
 
-        # จุดบอกสถานะด้านล่าง
-        dot = QColor(ORANGE)
-        dot.setAlpha(150)
-        p.setBrush(QBrush(dot))
-        p.drawEllipse(QRectF(ox + 7, 66, 4, 4))
+        if self.remain is None:
+            # ยังไม่มีข้อมูล — แสดงจุดสถานะไปก่อน
+            dot = QColor(ORANGE)
+            dot.setAlpha(150)
+            p.setBrush(QBrush(dot))
+            p.drawEllipse(QRectF(ox + 7, 62, 4, 4))
+            return
+
+        # เหลือเท่าไหร่ — สีตามการใช้งาน (ใช้เยอะ = เหลือน้อย = แดง)
+        used = 100.0 - self.remain
+        n = int(round(self.remain))
+
+        num = QFont()
+        num.setFamilies(THAI_FONTS)
+        num.setPointSize(13)
+        num.setWeight(QFont.Weight.Bold)
+        p.setFont(num)
+        p.setPen(QPen(usage_color(used)))
+        p.drawText(QRectF(ox - 6, 52, 30, 18),
+                   Qt.AlignmentFlag.AlignCenter, str(n))
+
+        unit = QFont()
+        unit.setFamilies(THAI_FONTS)
+        unit.setPointSize(8)
+        unit.setWeight(QFont.Weight.DemiBold)
+        p.setFont(unit)
+        pen = QPen(usage_color(used))
+        p.setPen(pen)
+        p.drawText(QRectF(ox - 6, 68, 30, 12),
+                   Qt.AlignmentFlag.AlignCenter, "%")
 
     def mousePressEvent(self, _):
         self.widget.reveal()
@@ -929,6 +960,7 @@ class UsageWidget(QWidget):
         self.worker = None          # FetchWorker ที่กำลังทำงาน (None = ว่าง)
         self.fail_streak = 0        # จำนวน error ติดกัน ใช้คำนวณ backoff
         self.last_entries = []      # ข้อมูลล่าสุด ไว้ต่ออายุข้อความนับถอยหลัง
+        self.last_peak = None       # % ที่ใช้ไปของลิมิตที่ตึงที่สุด
 
         self.layout_main = QVBoxLayout(self)
         self.layout_main.setContentsMargins(20, 16, 20, 14)
@@ -1173,6 +1205,8 @@ class UsageWidget(QWidget):
             if self.tab:
                 self.tab.close()
             self.tab = EdgeTab(self, side)
+            if self.last_peak is not None:
+                self.tab.set_remain(100.0 - self.last_peak)
             if side == "left":
                 self.tab.move(screen.left(), y)
             else:
@@ -1496,6 +1530,9 @@ class UsageWidget(QWidget):
         self._push_history(entries)
 
         peak = max((n.get("utilization") or 0) for _, n in entries) if entries else 0
+        self.last_peak = peak
+        if self.tab is not None:
+            self.tab.set_remain(100.0 - peak)
         self._update_tray(peak)
         self._maybe_notify(entries)
         self._schedule(POLL_BUSY_MS if peak >= 80 else POLL_NORMAL_MS)

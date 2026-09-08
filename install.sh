@@ -147,12 +147,34 @@ if [[ $BUILD_ONLY -eq 1 ]]; then
     exit 0
 fi
 
-# ---------- ติดตั้ง ----------
+# ---------- ถอนตัวเดิมก่อน ----------
+OLD_AUTOSTART=0
 if [[ -d "/Applications/$APP_NAME.app" ]]; then
-    warn "พบแอปเดิมอยู่แล้ว กำลังแทนที่…"
+    OLD_VER=$(defaults read "/Applications/$APP_NAME.app/Contents/Info.plist" \
+              CFBundleShortVersionString 2>/dev/null || echo "?")
+    warn "พบแอปเดิมติดตั้งอยู่ (เวอร์ชัน $OLD_VER) — ถอนออกก่อนติดตั้งตัวใหม่"
+
+    info "ปิดแอปที่รันอยู่…"
     osascript -e "quit app \"$APP_NAME\"" 2>/dev/null || true
     sleep 1
+    pkill -f "/Applications/$APP_NAME.app" 2>/dev/null || true
+
+    PLIST="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
+    if [[ -f "$PLIST" ]]; then
+        info "ยกเลิก LaunchAgent เดิม…"
+        launchctl unload "$PLIST" 2>/dev/null || true
+        rm -f "$PLIST"
+        OLD_AUTOSTART=1      # เคยตั้งเปิดอัตโนมัติไว้ ไว้ถามใหม่ตอนท้าย
+    fi
+
+    info "ลบแอปเดิมออกจาก /Applications…"
     rm -rf "/Applications/$APP_NAME.app"
+
+    # ล้าง cache ของ Launch Services กันไอคอน/เวอร์ชันเก่าค้าง
+    rm -rf "$HOME/Library/Saved Application State/$BUNDLE_ID.savedState" 2>/dev/null || true
+
+    info "ถอนตัวเดิมเรียบร้อย (ค่าตั้งและ sessionKey ยังอยู่ครบ)"
+    echo
 fi
 
 info "ติดตั้งลง /Applications…"
@@ -161,7 +183,12 @@ xattr -cr "/Applications/$APP_NAME.app" 2>/dev/null || true
 
 # ---------- เปิดเองตอนบูต ----------
 echo
-read -r -p "ตั้งให้เปิดอัตโนมัติตอนเปิดเครื่องด้วยไหม? [y/N] " REPLY
+if [[ $OLD_AUTOSTART -eq 1 ]]; then
+    read -r -p "เดิมตั้งเปิดอัตโนมัติไว้ — ตั้งให้เหมือนเดิมไหม? [Y/n] " REPLY
+    [[ "$REPLY" =~ ^[Nn]$ ]] || REPLY="y"
+else
+    read -r -p "ตั้งให้เปิดอัตโนมัติตอนเปิดเครื่องด้วยไหม? [y/N] " REPLY
+fi
 if [[ "$REPLY" =~ ^[Yy]$ ]]; then
     PLIST="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
