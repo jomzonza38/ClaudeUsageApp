@@ -1,8 +1,20 @@
 # Claude Usage Widget
 
+![platform](https://img.shields.io/badge/platform-macOS%2012%2B-000000?logo=apple&logoColor=white)
+![python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white)
+![PyQt6](https://img.shields.io/badge/GUI-PyQt6-41CD52?logo=qt&logoColor=white)
+[![release](https://img.shields.io/github/v/release/jomzonza38/ClaudeUsageApp?color=7a6fd6)](https://github.com/jomzonza38/ClaudeUsageApp/releases/latest)
+[![license](https://img.shields.io/badge/license-MIT-d6ff5c)](LICENSE)
+
 Floating widget บนเดสก์ท็อป macOS สำหรับดูโควตาการใช้งาน Claude แบบเรียลไทม์ — ไม่ต้องเปิดเว็บไปเช็คเอง
 
 เขียนด้วย Python + PyQt6 แล้ว build เป็นแอป `.app` ด้วย py2app
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="Claude Usage Widget" width="380">
+</p>
+
+> ยังไม่มีภาพ? ดูวิธีถ่ายที่หัวข้อ [ภาพประกอบ](#ภาพประกอบ) ด้านล่าง
 
 ## ฟีเจอร์
 
@@ -25,7 +37,7 @@ Floating widget บนเดสก์ท็อป macOS สำหรับดู
 | Python 3 | ถ้ายังไม่มีโหลดจาก [python.org](https://www.python.org) |
 | บัญชี claude.ai | ต้องใช้ `sessionKey` จากคุกกี้ (ดูหัวข้อด้านล่าง) |
 
-dependency ทั้งหมด (`PyQt6`, `requests`, `keyring`, `py2app`, `pyobjc`, `pillow`) ตัวติดตั้งลงให้เองใน virtualenv แยก ไม่ไปยุ่งกับ Python ของเครื่อง
+dependency ทั้งหมดล็อกเวอร์ชันไว้ใน [`requirements.txt`](requirements.txt) แล้ว ตัวติดตั้งจะลงให้เองใน virtualenv แยก ไม่ไปยุ่งกับ Python ของเครื่อง
 
 ## ติดตั้ง
 
@@ -132,3 +144,21 @@ chmod +x make_dmg.sh
 แอปนี้เรียก endpoint ภายในของ claude.ai ที่ **ไม่มีเอกสารทางการรองรับ** ถ้า Anthropic เปลี่ยนโครงสร้าง response เมื่อไหร่ แอปอาจพังได้ และไม่ได้เกี่ยวข้องกับ Anthropic แต่อย่างใด
 
 เป็นโปรเจกต์ส่วนตัว ใช้เองเป็นหลัก
+
+## ภาพประกอบ
+
+README อ้างถึง `docs/screenshot.png` ถ้ายังไม่มี ถ่ายได้ด้วย:
+
+```bash
+mkdir -p docs
+# ⌘ + ⇧ + 4 แล้วกด Space → คลิกที่ widget → ได้ภาพพร้อมเงาโปร่งใส
+# หรือถ่ายเป็นวิดีโอสั้นแล้วแปลงเป็น GIF:
+#   ⌘ + ⇧ + 5 → บันทึกส่วนที่เลือก → ได้ .mov
+#   ffmpeg -i screen.mov -vf "fps=15,scale=380:-1" -loop 0 docs/demo.gif
+```
+
+แนะนำให้ถ่ายตอนขอบ RGB กำลังหมุนและตอนเลื่อนซ่อนเข้าขอบจอ — สองอย่างนี้ต้องเห็นเป็นภาพเคลื่อนไหวถึงจะเข้าใจ
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 Worawalan Kongsom

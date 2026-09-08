@@ -47,7 +47,11 @@ source venv/bin/activate
 
 info "ติดตั้ง dependency (อาจใช้เวลาสักครู่)…"
 pip install --upgrade pip -q
-pip install -q py2app PyQt6 requests keyring pyobjc-framework-Cocoa pillow
+if [[ -f requirements.txt ]]; then
+    pip install -q -r requirements.txt
+else
+    pip install -q py2app PyQt6 requests keyring pyobjc-framework-Cocoa pillow
+fi
 
 # ---------- ไอคอน ----------
 if [[ -f icon.icns ]]; then

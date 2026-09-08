@@ -1,0 +1,12 @@
+# เวอร์ชันล็อกไว้ตามที่ทดสอบผ่านจริงบน Python 3.12 / macOS (Apple Silicon)
+# อัปเดตทีเดียวได้ด้วย: pip install -U -r requirements.txt && pip freeze
+
+# --- runtime ---
+PyQt6==6.11.0
+requests==2.34.2
+keyring==25.7.0
+pyobjc-framework-Cocoa==12.2.1
+
+# --- build เท่านั้น (ไม่จำเป็นถ้าจะรันด้วย python3 ตรง ๆ) ---
+py2app==0.28.10
+pillow==12.3.0
