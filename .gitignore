@@ -3,7 +3,8 @@ venv/
 build/
 dist/
 *.egg-info/
-setup.py          # ถูก generate ใหม่ทุกครั้งโดย install.sh
+# setup.py ถูก generate ใหม่ทุกครั้งโดย install.sh
+setup.py
 *.dmg
 dmg_staging/
 icon.iconset/
